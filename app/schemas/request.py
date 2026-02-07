@@ -16,4 +16,6 @@ class Message(BaseModel):
 class AnalyzeRequest(BaseModel):
     uuid: str = Field(..., description="Request UUID")
     messages: List[Message] = Field(..., description="Ordered message list")
-    platform: str = Field(..., description="Platform name (e.g. TELEGRAM)")
+    platform: Literal["INSTAGRAM", "TELEGRAM"] = Field(
+        ..., description="Platform name (INSTAGRAM or TELEGRAM)"
+    )

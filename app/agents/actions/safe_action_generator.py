@@ -5,6 +5,10 @@ from typing import Dict, List, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from app.agents.actions.platform_guidance import (
+    get_platform_guidance,
+    supported_platforms_text,
+)
 from app.core.logging import get_logger
 from app.agents.explanation.rag.retrieval_contract import Reference
 
@@ -18,8 +22,9 @@ logger = get_logger(__name__)
 
 
 def _fallback_safe_actions(
-    risk_stage: str, references: List[Reference]
+    risk_stage: str, references: List[Reference], platform: str
 ) -> Dict[str, object]:
+    guidance = get_platform_guidance(platform)
     if references:
         note = references[0].note.strip()
         summary = f"참고 자료에 따르면 {note}"
@@ -30,10 +35,36 @@ def _fallback_safe_actions(
     else:
         summary = "현재로서는 명확한 위험 징후가 보이지 않습니다."
 
+    if risk_stage == "critical":
+        base_recommendations = [
+            "금전 송금이나 개인정보 전달을 즉시 중단하세요.",
+            "공식 고객센터 또는 기관에 사실 여부를 즉시 확인하세요.",
+        ]
+    elif risk_stage == "suspicious":
+        base_recommendations = [
+            "상대방의 요구를 바로 이행하지 말고 사실 여부를 먼저 확인하세요.",
+            "대화 내용과 거래 증빙을 보관해 추가 피해에 대비하세요.",
+        ]
+    else:
+        base_recommendations = [
+            "현재 징후가 약하더라도 외부 링크와 결제 요청은 신중히 검토하세요.",
+            "대화 상대의 신원과 제안 근거를 공식 채널에서 재확인하세요.",
+        ]
+
+    recommendations = _ensure_platform_recommendation(
+        base_recommendations + guidance.fallback_recommendations,
+        guidance.mandatory_recommendation,
+        guidance.recommendation_keywords,
+    )
+    recommendations = _ensure_min_recommendations(
+        recommendations,
+        guidance.fallback_recommendations + [guidance.mandatory_recommendation],
+    )
+
     return {
         "summary": summary,
         "risk_signals": [],
-        "additional_recommendations": [],
+        "additional_recommendations": recommendations,
         "rag_references": [],
     }
 
@@ -55,16 +86,80 @@ def _parse_json_payload(text: str) -> Optional[Dict[str, object]]:
             return None
 
 
+def _ensure_platform_recommendation(
+    recommendations: List[str],
+    mandatory_recommendation: str,
+    keywords: List[str],
+    max_items: int = 4,
+) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for recommendation in recommendations:
+        text = str(recommendation).strip()
+        if not text or text in seen:
+            continue
+        deduped.append(text)
+        seen.add(text)
+
+    normalized_keywords = [keyword.lower() for keyword in keywords if keyword.strip()]
+    has_platform_item = any(
+        any(keyword in item.lower() for keyword in normalized_keywords)
+        for item in deduped
+    )
+    has_block_or_report = any(
+        "차단" in item or "신고" in item for item in deduped
+    )
+
+    if not (has_platform_item and has_block_or_report):
+        mandatory = mandatory_recommendation.strip()
+        if mandatory:
+            if len(deduped) >= max_items:
+                deduped = deduped[: max_items - 1]
+            if mandatory not in deduped:
+                deduped.append(mandatory)
+
+    return deduped[:max_items]
+
+
+def _ensure_min_recommendations(
+    recommendations: List[str],
+    fallback_candidates: List[str],
+    min_items: int = 2,
+    max_items: int = 4,
+) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for recommendation in recommendations:
+        text = str(recommendation).strip()
+        if not text or text in seen:
+            continue
+        deduped.append(text)
+        seen.add(text)
+
+    for candidate in fallback_candidates:
+        if len(deduped) >= min_items:
+            break
+        text = str(candidate).strip()
+        if not text or text in seen:
+            continue
+        deduped.append(text)
+        seen.add(text)
+
+    return deduped[:max_items]
+
+
 def _call_openai_safe_actions(
     risk_stage: str,
     conversation_type: str,
     references: List[Reference],
     conversation_lines: List[str],
+    platform: str,
 ) -> Optional[Dict[str, object]]:
     if not os.getenv("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY not set; using fallback safe actions.")
         return None
 
+    guidance = get_platform_guidance(platform)
     model = os.getenv(OPENAI_MODEL_ENV, DEFAULT_OPENAI_MODEL)
 
     reference_text = (
@@ -87,6 +182,8 @@ def _call_openai_safe_actions(
         "반드시 JSON으로만 출력해라. "
         "summary는 1문장 요약이며, 참고 자료가 있으면 반드시 참고 자료를 근거로 작성한다. "
         "summary는 반드시 존댓말(입니다/합니다)로 작성한다. "
+        f"플랫폼은 {guidance.platform}이며 지원 플랫폼은 {supported_platforms_text()}다. "
+        f"{guidance.llm_instructions} "
         "risk_signals는 대화에서 위험하다고 판단되는 내용을 인용하고, 왜 위험한지 짧게 설명한다. "
         "risk_signals의 각 항목은 quote(대화에서 그대로 인용)와 reason(왜 위험한지)로 구성한다. "
         "quote는 대화 발췌에 실제로 등장하는 문장/구절이어야 한다. "
@@ -147,6 +244,7 @@ def _call_openai_safe_actions(
         "}"
     )
     prompt = (
+        f"플랫폼: {guidance.platform}\n"
         f"위험 단계: {risk_stage}\n"
         f"대화 유형: {conversation_type}\n"
         f"참고 자료: {reference_text}\n"
@@ -229,6 +327,15 @@ def _call_openai_safe_actions(
         cleaned_recommendations = [
             str(item).strip() for item in recommendations if str(item).strip()
         ]
+        cleaned_recommendations = _ensure_platform_recommendation(
+            cleaned_recommendations,
+            guidance.mandatory_recommendation,
+            guidance.recommendation_keywords,
+        )
+        cleaned_recommendations = _ensure_min_recommendations(
+            cleaned_recommendations,
+            guidance.fallback_recommendations + [guidance.mandatory_recommendation],
+        )
         if len(cleaned_recommendations) < 2:
             logger.warning("OpenAI safe actions recommendations invalid; using fallback.")
             return None
@@ -248,12 +355,13 @@ def generate_safe_actions(
     conversation_type: str,
     references: List[Reference],
     conversation_lines: List[str],
+    platform: str,
 ) -> Dict[str, object]:
     """요약, 위험 신호, 추가 권고를 생성."""
     llm_result = _call_openai_safe_actions(
-        risk_stage, conversation_type, references, conversation_lines
+        risk_stage, conversation_type, references, conversation_lines, platform
     )
     if llm_result:
         return llm_result
 
-    return _fallback_safe_actions(risk_stage, references)
+    return _fallback_safe_actions(risk_stage, references, platform)

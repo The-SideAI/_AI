@@ -14,6 +14,12 @@ Conversation-based risk decision support system with a deterministic pipeline.
 - Request: JSON
 - Response: JSON
 
+### Request Rules
+
+- `platform`: `INSTAGRAM` 또는 `TELEGRAM`만 허용
+- `messages[].type`: `TEXT` 또는 `URL`
+- `URL` 메시지는 OCR로 텍스트를 추출해 분석 파이프라인에 합쳐 처리
+
 ## Swagger
 
 - http://localhost:8000/docs

@@ -94,7 +94,7 @@ def run_analysis_pipeline(payload: AnalyzeRequest) -> Dict[str, object]:
         conversation, matched_phrases, max_lines=20
     )
     safe_actions = generate_safe_actions(
-        risk_stage, conversation_type, references, conversation_lines
+        risk_stage, conversation_type, references, conversation_lines, payload.platform
     )
     logger.info("Step 6 safe_actions generated")
 
